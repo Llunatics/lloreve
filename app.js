@@ -14,7 +14,18 @@
       if (!raw) return structuredClone(L.PRESETS);
       const data = JSON.parse(raw);
       if (!Array.isArray(data)) return structuredClone(L.PRESETS);
-      return data.filter((t) => L.validateTitle(t).length === 0);
+      if (data.length === 0) return []; // user emptied the collection on purpose
+      // Drop corrupt entries one by one — a single bad title must not
+      // discard the whole collection (validateTitle never throws now,
+      // but a bad entry is still filtered defensively).
+      const kept = data.filter((t) => {
+        try {
+          return L.validateTitle(t).length === 0;
+        } catch {
+          return false;
+        }
+      });
+      return kept.length > 0 ? kept : structuredClone(L.PRESETS);
     } catch {
       return structuredClone(L.PRESETS);
     }
@@ -70,7 +81,7 @@
 
   function trackView(t, track) {
     const p = L.titleProgress(t).per[track];
-    const unit = t.units[track];
+    const unit = esc(t.units[track] || "");
     const ownedStr = L.rangeToString(t.owned[track]);
     const nums = p.total > 0
       ? `${p.owned} / ${p.total} ${unit} · ${p.pct}%`
@@ -91,10 +102,10 @@
         if (to === from) continue;
         const cov = L.equivalentCoverage(t, from, to);
         if (cov.length === 0) continue;
-        parts.push(`${L.TRACK_LABEL[to].toLowerCase()} <code>${esc(L.rangeToString(cov))} ${t.units[to]}</code>`);
+        parts.push(`${esc(L.TRACK_LABEL[to].toLowerCase())} <code>${esc(L.rangeToString(cov))} ${esc(t.units[to] || "")}</code>`);
       }
       if (parts.length > 0) {
-        lines.push(`Own ${L.TRACK_LABEL[from].toLowerCase()} <b>${esc(L.rangeToString(t.owned[from]))} ${t.units[from]}</b> → covers ${parts.join(" · ")}`);
+        lines.push(`Own ${esc(L.TRACK_LABEL[from].toLowerCase())} <b>${esc(L.rangeToString(t.owned[from]))} ${esc(t.units[from] || "")}</b> → covers ${parts.join(" · ")}`);
       }
     }
     return lines.length ? `<div class="equiv">${lines.join("<br>")}</div>` : "";
@@ -102,7 +113,7 @@
 
   function mapTable(t) {
     if (!t.mappings || t.mappings.length === 0) return "";
-    const cell = (r) => (r === null || r === undefined ? `<td class="na">—</td>` : `<td>${r[0] === r[1] ? r[0] : `${r[0]}–${r[1]}`}</td>`);
+    const cell = (r) => (r === null || r === undefined ? `<td class="na">—</td>` : `<td>${esc(r[0])}${r[0] === r[1] ? "" : `–${esc(r[1])}`}</td>`);
     const rows = t.mappings.map((m) => `<tr>${cell(m.ln)}${cell(m.manga)}${cell(m.anime)}</tr>`).join("");
     return `<table class="map-table">
       <thead><tr><th>LN (${esc(t.units.ln)})</th><th>Manga (ch)</th><th>Anime (ep)</th></tr></thead>
@@ -114,7 +125,7 @@
     $("empty").hidden = vis.length !== 0;
     $("list").innerHTML = vis.map((t) => {
       const comp = L.titleCompletion(t);
-      const stars = t.rating > 0 ? `<span class="stars" title="Rated ${t.rating}/5">${"★".repeat(t.rating)}${"☆".repeat(5 - t.rating)}</span>` : "";
+      const stars = t.rating > 0 ? `<span class="stars" title="Rated ${Math.round(t.rating)}/5">${"★".repeat(Math.round(t.rating))}${"☆".repeat(5 - Math.round(t.rating))}</span>` : "";
       return `<article class="card" data-id="${esc(t.id)}">
         <div class="card-head">
           <h3>${esc(t.name)}</h3>
@@ -212,7 +223,7 @@
       t.id = $("f-id").value || t.id;
       t.name = $("f-name").value.trim();
       t.status = $("f-status").value;
-      t.rating = Math.max(0, Math.min(5, Number($("f-rating").value) || 0));
+      t.rating = Math.max(0, Math.min(5, Math.round(Number($("f-rating").value) || 0)));
       t.units = { ln: $("f-unit-ln").value, manga: "ch", anime: "ep" };
       for (const track of L.TRACKS) {
         t.owned[track] = L.parseRanges($(`f-owned-${track}`).value);
@@ -275,6 +286,8 @@
       if (!Array.isArray(data)) throw new Error("file must contain a JSON array of titles");
       const bad = data.map((t) => L.validateTitle(t)).flat();
       if (bad.length > 0) throw new Error("invalid titles in file:\n" + bad.slice(0, 5).join("\n"));
+      if (new Set(data.map((t) => t.id)).size !== data.length)
+        throw new Error("duplicate title ids in file");
       titles = data;
       saveAndRender();
     } catch (ex) {

@@ -131,4 +131,45 @@ eq(L.rangeSubtract([1, 10], [20, 30]), [[1, 10]], "subtract disjoint -> unchange
   eq(b.units, { ln: "vol", manga: "ch", anime: "ep" }, "blankTitle units");
 }
 
+/* 8. audit 2026-11-14: validation must never throw, ranges must be integers */
+{
+  // incomplete shapes -> error list, not a throw (a single bad stored title
+  // used to nuke the whole collection via load()'s filter)
+  ok(Array.isArray(L.validateTitle({})) && L.validateTitle({}).length > 0, "validate: {} returns errors, no throw");
+  const noOwned = L.blankTitle(); delete noOwned.owned;
+  ok(L.validateTitle(noOwned).some((e) => e.includes("owned")), "validate: missing owned -> error, no throw");
+  const noTotal = L.blankTitle(); delete noTotal.total;
+  ok(L.validateTitle(noTotal).some((e) => e.includes("total")), "validate: missing total -> error, no throw");
+  const noUnits = L.blankTitle(); delete noUnits.units;
+  ok(L.validateTitle(noUnits).some((e) => e.includes("units")), "validate: missing units -> error, no throw");
+  const noId = L.blankTitle(); delete noId.id;
+  ok(L.validateTitle(noId).some((e) => e.includes("id")), "validate: missing id -> error");
+  // non-integer range endpoints are rejected (strings smuggled an XSS
+  // payload through the mapping table; fractions/NaN broke rangeTotal)
+  const strOwned = L.blankTitle(); strOwned.name = "x";
+  strOwned.owned.ln = [["<img src=x onerror=alert(1)>", "zzz"]];
+  ok(L.validateTitle(strOwned).some((e) => e.includes("non-integer")), "validate: string owned range rejected");
+  const fracOwned = L.blankTitle(); fracOwned.name = "x";
+  fracOwned.owned.ln = [[1.5, 4]];
+  ok(L.validateTitle(fracOwned).some((e) => e.includes("non-integer")), "validate: fractional owned range rejected");
+  const nanOwned = L.blankTitle(); nanOwned.name = "x";
+  nanOwned.owned.ln = [[NaN, 4]];
+  ok(L.validateTitle(nanOwned).some((e) => e.includes("non-integer")), "validate: NaN owned range rejected");
+  const strMap = L.blankTitle(); strMap.name = "x";
+  strMap.mappings = [{ ln: ["<img src=x onerror=alert(1)>", "zzz"], manga: null, anime: null }];
+  ok(L.validateTitle(strMap).some((e) => e.includes("invalid ln")), "validate: string mapping range rejected");
+  const nullRow = L.blankTitle(); nullRow.name = "x";
+  nullRow.mappings = [null];
+  ok(L.validateTitle(nullRow).some((e) => e.includes("mapping row")), "validate: null mapping row -> error, no throw");
+  const strOwnedShape = L.blankTitle(); strOwnedShape.name = "x";
+  strOwnedShape.owned.ln = "1-4";
+  ok(L.validateTitle(strOwnedShape).some((e) => e.includes("must be an array")), "validate: owned as string rejected");
+  // stats/progress/topTitles tolerate a title missing owned/total
+  const bare = { name: "x", status: "plan", rating: 0 };
+  ok(L.titleProgress(bare).per.ln.owned === 0, "titleProgress tolerates missing owned/total");
+  ok(L.titleCompletion(bare) === null, "titleCompletion tolerates missing owned/total");
+  ok(L.collectionStats([bare]).titles === 1, "collectionStats tolerates missing owned/total");
+  ok(L.topTitles([bare], 5).length === 1, "topTitles tolerates missing owned/total");
+}
+
 console.log(`\n${n} assertions passed.`);

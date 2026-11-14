@@ -102,9 +102,9 @@ function mapRangeThroughRow(row, fromTrack, toTrack, [a, b]) {
 /** Estimate which ranges of `toTrack` the owned ranges of `fromTrack`
  *  cover, using the title's mapping rows. Returns merged ranges. */
 function equivalentCoverage(title, fromTrack, toTrack) {
-  if (fromTrack === toTrack) return mergeRanges(title.owned[fromTrack] || []);
+  if (fromTrack === toTrack) return mergeRanges((title.owned || {})[fromTrack] || []);
   const out = [];
-  for (const owned of title.owned[fromTrack] || []) {
+  for (const owned of (title.owned || {})[fromTrack] || []) {
     for (const row of title.mappings || []) {
       const mapped = mapRangeThroughRow(row, fromTrack, toTrack, owned);
       if (mapped) out.push(mapped);
@@ -117,8 +117,8 @@ function equivalentCoverage(title, fromTrack, toTrack) {
 function titleProgress(title) {
   const per = {};
   for (const t of TRACKS) {
-    const owned = rangeTotal(title.owned[t] || []);
-    const total = title.total[t] || 0;
+    const owned = rangeTotal((title.owned || {})[t] || []);
+    const total = (title.total || {})[t] || 0;
     per[t] = {
       owned,
       total,
@@ -158,8 +158,8 @@ function collectionStats(titles) {
   for (const t of titles) {
     if (STATUSES.includes(t.status)) stats.byStatus[t.status]++;
     for (const track of TRACKS) {
-      stats.owned[track] += rangeTotal(t.owned[track] || []);
-      stats.knownTotals[track] += t.total[track] || 0;
+      stats.owned[track] += rangeTotal((t.owned || {})[track] || []);
+      stats.knownTotals[track] += (t.total || {})[track] || 0;
     }
     if (t.rating > 0) {
       stats.rated++;
@@ -186,13 +186,13 @@ function topTitles(titles, n = 5) {
       const cb = b.completion === null ? -1 : b.completion;
       if (cb !== ca) return cb - ca;
       const oa =
-        rangeTotal(a.title.owned.ln) +
-        rangeTotal(a.title.owned.manga) +
-        rangeTotal(a.title.owned.anime);
+        rangeTotal((a.title.owned || {}).ln || []) +
+        rangeTotal((a.title.owned || {}).manga || []) +
+        rangeTotal((a.title.owned || {}).anime || []);
       const ob =
-        rangeTotal(b.title.owned.ln) +
-        rangeTotal(b.title.owned.manga) +
-        rangeTotal(b.title.owned.anime);
+        rangeTotal((b.title.owned || {}).ln || []) +
+        rangeTotal((b.title.owned || {}).manga || []) +
+        rangeTotal((b.title.owned || {}).anime || []);
       if (ob !== oa) return ob - oa;
       return a.title.name.localeCompare(b.title.name);
     })
@@ -204,32 +204,68 @@ function topTitles(titles, n = 5) {
 function validateTitle(t) {
   const errors = [];
   if (!t || typeof t !== "object") return ["title must be an object"];
+  if (typeof t.id !== "string" || t.id.trim() === "")
+    errors.push("id is required");
   if (typeof t.name !== "string" || t.name.trim() === "")
     errors.push("name is required");
   if (t.name && t.name.length > 200) errors.push("name is too long (max 200)");
   if (!STATUSES.includes(t.status)) errors.push(`status must be one of ${STATUSES.join(", ")}`);
-  if (typeof t.rating !== "number" || t.rating < 0 || t.rating > 5)
+  if (typeof t.rating !== "number" || !Number.isFinite(t.rating) || t.rating < 0 || t.rating > 5)
     errors.push("rating must be 0-5");
+  const owned = t.owned && typeof t.owned === "object" && !Array.isArray(t.owned) ? t.owned : null;
+  const total = t.total && typeof t.total === "object" && !Array.isArray(t.total) ? t.total : null;
+  if (!owned) errors.push("owned must be an object");
+  if (!total) errors.push("total must be an object");
+  if (!t.units || typeof t.units !== "object" || Array.isArray(t.units))
+    errors.push("units must be an object");
+  else
+    for (const track of TRACKS) {
+      if (typeof t.units[track] !== "string" || t.units[track] === "")
+        errors.push(`units.${track} must be a non-empty string`);
+    }
+  const totOf = (track) => (total ? total[track] : undefined);
   for (const track of TRACKS) {
-    const total = t.total[track];
-    if (typeof total !== "number" || total < 0 || !Number.isInteger(total))
+    const tot = totOf(track);
+    if (typeof tot !== "number" || !Number.isInteger(tot) || tot < 0)
       errors.push(`total.${track} must be a non-negative integer`);
-    for (const [a, b] of t.owned[track] || []) {
+    const ranges = owned ? owned[track] : undefined;
+    if (ranges === undefined || ranges === null) {
+      if (owned) errors.push(`owned.${track} is required`);
+      continue;
+    }
+    if (!Array.isArray(ranges)) {
+      errors.push(`owned.${track} must be an array of ranges`);
+      continue;
+    }
+    for (const r of ranges) {
+      if (!Array.isArray(r) || r.length !== 2 || !Number.isInteger(r[0]) || !Number.isInteger(r[1])) {
+        errors.push(`owned.${track} has a non-integer range`);
+        continue;
+      }
+      const [a, b] = r;
       if (a < 1 || b < a) errors.push(`owned.${track} has an invalid range ${a}-${b}`);
-      if (total > 0 && b > total)
-        errors.push(`owned.${track} ${a}-${b} exceeds total ${total}`);
+      if (typeof tot === "number" && tot > 0 && b > tot)
+        errors.push(`owned.${track} ${a}-${b} exceeds total ${tot}`);
     }
   }
-  for (const row of t.mappings || []) {
-    for (const track of TRACKS) {
-      const r = row[track];
-      if (r !== null && r !== undefined) {
-        if (!Array.isArray(r) || r.length !== 2 || r[0] < 1 || r[1] < r[0])
-          errors.push(`mapping has an invalid ${track} range`);
+  if (t.mappings !== undefined && t.mappings !== null) {
+    if (!Array.isArray(t.mappings)) errors.push("mappings must be an array");
+    else
+      for (const row of t.mappings) {
+        if (!row || typeof row !== "object" || Array.isArray(row)) {
+          errors.push("mapping row must be an object");
+          continue;
+        }
+        for (const track of TRACKS) {
+          const r = row[track];
+          if (r !== null && r !== undefined) {
+            if (!Array.isArray(r) || r.length !== 2 || !Number.isInteger(r[0]) || !Number.isInteger(r[1]) || r[0] < 1 || r[1] < r[0])
+              errors.push(`mapping has an invalid ${track} range`);
+          }
+        }
+        if (TRACKS.every((track) => row[track] === null || row[track] === undefined))
+          errors.push("mapping row is empty (all tracks null)");
       }
-    }
-    if (TRACKS.every((track) => row[track] === null || row[track] === undefined))
-      errors.push("mapping row is empty (all tracks null)");
   }
   return errors;
 }

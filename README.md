@@ -65,8 +65,8 @@ Starter presets (editable, deletable):
 ## Tests
 
 ```bash
-node tests/run.js       # 50 assertions: ranges, conversion, stats, validation
-node tests/ui-smoke.js  # 21 assertions: stats, list, search, dialog, reset
+node tests/run.js       # 65 assertions: ranges, conversion, stats, validation
+node tests/ui-smoke.js  # 32 assertions: stats, list, search, dialog, reset, adversarial import/storage
 ```
 
 ## Data model

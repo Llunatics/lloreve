@@ -17,6 +17,7 @@ class El {
     this.className = "";
     this.listeners = {};
     this.dataset = {};
+    this.files = [];
   }
   set innerHTML(v) { this._html = String(v); this.children = []; }
   get innerHTML() { return this._html; }
@@ -31,28 +32,32 @@ class El {
   remove() {}
 }
 
-const elements = {};
-const documentStub = {
-  getElementById: (id) => (elements[id] ??= new El(id)),
-  createElement: (tag) => new El(tag),
-  addEventListener: () => {},
-};
-const store = {};
-const sandbox = {
-  console,
-  window: {},
-  document: documentStub,
-  localStorage: {
-    getItem: (k) => (k in store ? store[k] : null),
-    setItem: (k, v) => { store[k] = String(v); },
-  },
-  structuredClone,
-  confirm: () => true,
-  alert: () => {},
-};
-vm.createContext(sandbox);
-vm.runInContext(fs.readFileSync("lloreve.js", "utf8"), sandbox, { filename: "lloreve.js" });
-vm.runInContext(fs.readFileSync("app.js", "utf8"), sandbox, { filename: "app.js" });
+function boot(storeData) {
+  const elements = {};
+  const store = {};
+  if (storeData !== undefined) store["lloreve.v1"] = storeData;
+  const alerts = [];
+  const sandbox = {
+    console,
+    window: {},
+    document: {
+      getElementById: (id) => (elements[id] ??= new El(id)),
+      createElement: (tag) => new El(tag),
+      addEventListener: () => {},
+    },
+    localStorage: {
+      getItem: (k) => (k in store ? store[k] : null),
+      setItem: (k, v) => { store[k] = String(v); },
+    },
+    structuredClone,
+    confirm: () => true,
+    alert: (msg) => { alerts.push(String(msg)); },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync("lloreve.js", "utf8"), sandbox, { filename: "lloreve.js" });
+  vm.runInContext(fs.readFileSync("app.js", "utf8"), sandbox, { filename: "app.js" });
+  return { elements, store, alerts, sandbox };
+}
 
 let n = 0;
 const ok = (cond, name) => {
@@ -62,6 +67,7 @@ const ok = (cond, name) => {
 };
 
 // initial render ran at load: presets seeded, stats + list populated
+const { elements, store } = boot();
 const statsHtml = elements.stats.innerHTML;
 ok(statsHtml.includes(">3 <"), "stats show 3 titles, got: " + statsHtml.slice(0, 120));
 ok(statsHtml.includes("182"), "stats show 182 LN vol owned");
@@ -100,4 +106,70 @@ ok(resetBtn.listeners.click && resetBtn.listeners.click.length === 1, "reset but
 resetBtn.listeners.click[0]();
 ok(JSON.parse(store["lloreve.v1"]).length === 3, "reset persists 3 presets to localStorage");
 
-console.log(`\n${n} UI smoke assertions passed.`);
+/* ---- audit 2026-11-14: adversarial render/storage cases ---- */
+const L = require("../lloreve.js");
+{
+  // hostile units must be escaped, never rendered as live HTML (stored XSS)
+  const evil = L.blankTitle();
+  evil.name = "Evil"; evil.status = "reading"; evil.rating = 5;
+  evil.units = { ln: "<img src=x onerror=alert(1)>", manga: "ch", anime: "ep" };
+  evil.owned = { ln: [[1, 2]], manga: [], anime: [] };
+  evil.total = { ln: 5, manga: 0, anime: 0 };
+  evil.mappings = [{ ln: [1, 2], manga: null, anime: null }];
+  const r = boot(JSON.stringify([evil, ...L.PRESETS]));
+  ok(!r.elements.list.innerHTML.includes("<img src=x onerror=alert(1)>"), "hostile units.ln is escaped in track view");
+  ok(r.elements.list.innerHTML.includes("&lt;img"), "hostile units.ln appears escaped, not raw");
+}
+{
+  // hostile mapping range strings must not reach the table as live HTML
+  const evil = L.blankTitle();
+  evil.name = "Evil2"; evil.status = "reading";
+  evil.mappings = [{ ln: ["<img src=x onerror=alert(1)>", "zzz"], manga: null, anime: null }];
+  const r = boot(JSON.stringify([evil]));
+  ok(!r.elements.list.innerHTML.includes("<img src=x onerror=alert(1)>"), "hostile mapping range is not rendered raw");
+}
+{
+  // one corrupt stored title must not discard the valid ones
+  const good = L.blankTitle(); good.name = "My Unique Title ZZZ"; good.status = "reading";
+  const bad = { name: "Broken" };
+  const r = boot(JSON.stringify([good, bad]));
+  ok(r.elements.list.innerHTML.includes("My Unique Title ZZZ"), "valid title survives a corrupt stored sibling");
+  ok(!r.elements.list.innerHTML.includes("Solo Leveling"), "presets are NOT force-loaded over valid stored data");
+}
+{
+  // fractional rating still renders exactly 5 star glyphs
+  const t = L.blankTitle(); t.name = "Half Star"; t.status = "reading"; t.rating = 3.5;
+  const r = boot(JSON.stringify([t]));
+  ok(r.elements.list.innerHTML.includes("★★★★☆"), "rating 3.5 renders ★★★★☆ (5 glyphs)");
+}
+
+/* ---- async: import handler ---- */
+(async () => {
+  const tick = () => new Promise((res) => setImmediate(res));
+  const fileOf = (obj) => ({ text: async () => JSON.stringify(obj) });
+  {
+    // duplicate ids in an import file are rejected, collection untouched
+    const a = L.blankTitle(); a.name = "Dup A"; a.status = "reading";
+    const b = L.blankTitle(); b.name = "Dup B"; b.status = "reading"; b.id = a.id;
+    const r = boot();
+    const input = r.elements["file-import"];
+    input.files = [fileOf([a, b])];
+    input.listeners.change[0]({ target: input });
+    await tick(); await tick();
+    ok(r.alerts.length === 1 && r.alerts[0].includes("duplicate"), "import with duplicate ids alerts, got: " + r.alerts.join("; "));
+    ok(r.elements.list.innerHTML.includes("Attack on Titan"), "duplicate-id import leaves collection untouched");
+  }
+  {
+    // a valid import replaces the collection
+    const t = L.blankTitle(); t.name = "Imported One"; t.status = "completed"; t.rating = 4;
+    const r = boot();
+    const input = r.elements["file-import"];
+    input.files = [fileOf([t])];
+    input.listeners.change[0]({ target: input });
+    await tick(); await tick();
+    ok(r.alerts.length === 0, "valid import raises no alert");
+    ok(r.elements.list.innerHTML.includes("Imported One"), "valid import replaces the list");
+    ok(!r.elements.list.innerHTML.includes("Attack on Titan"), "valid import drops the old titles");
+  }
+  console.log(`\n${n} UI smoke assertions passed.`);
+})();
