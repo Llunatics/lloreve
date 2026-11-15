@@ -5,7 +5,11 @@
   const STORE_KEY = "lloreve.v1";
   const $ = (id) => document.getElementById(id);
   const esc = (s) =>
-    String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    String(s)
+      // strip invisible control / bidi-override chars: a hostile shared
+      // title could otherwise reorder adjacent UI text (U+202E spoofing)
+      .replace(/[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
+      .replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
   /* ---------- state ---------- */
   function load() {
@@ -18,12 +22,19 @@
       // Drop corrupt entries one by one — a single bad title must not
       // discard the whole collection (validateTitle never throws now,
       // but a bad entry is still filtered defensively).
+      // Dedupe ids too: import rejects duplicates, but hand-edited
+      // storage could smuggle them in — edit/delete by id would then
+      // hit several titles at once. Keep the first occurrence.
+      const seenIds = new Set();
       const kept = data.filter((t) => {
         try {
-          return L.validateTitle(t).length === 0;
+          if (L.validateTitle(t).length !== 0) return false;
         } catch {
           return false;
         }
+        if (seenIds.has(t.id)) return false;
+        seenIds.add(t.id);
+        return true;
       });
       return kept.length > 0 ? kept : structuredClone(L.PRESETS);
     } catch {
@@ -31,10 +42,22 @@
     }
   }
   let titles = load();
+  // localStorage.setItem throws on quota exhaustion (large collection,
+  // private mode). A failed save must not kill the action: keep the
+  // change in memory, tell the user, and still re-render so the UI
+  // matches the in-memory state.
   function save() {
-    localStorage.setItem(STORE_KEY, JSON.stringify(titles));
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(titles));
+      return true;
+    } catch {
+      return false;
+    }
   }
-  const saveAndRender = () => { save(); render(); };
+  const saveAndRender = () => {
+    if (!save()) alert("Could not save to browser storage (storage full?) — changes are kept for this session only.");
+    render();
+  };
 
   /* ---------- stats ---------- */
   function renderStats() {
@@ -79,8 +102,8 @@
     return out;
   }
 
-  function trackView(t, track) {
-    const p = L.titleProgress(t).per[track];
+  function trackView(t, track, prog) {
+    const p = prog.per[track];
     const unit = esc(t.units[track] || "");
     const ownedStr = L.rangeToString(t.owned[track]);
     const nums = p.total > 0
@@ -93,14 +116,14 @@
     </div>`;
   }
 
-  function equivView(t) {
+  function equivView(t, prog) {
     const lines = [];
     for (const from of L.TRACKS) {
       if (L.rangeTotal(t.owned[from] || []) === 0) continue;
       const parts = [];
       for (const to of L.TRACKS) {
         if (to === from) continue;
-        const cov = L.equivalentCoverage(t, from, to);
+        const cov = prog.equiv[`${from}>${to}`];
         if (cov.length === 0) continue;
         parts.push(`${esc(L.TRACK_LABEL[to].toLowerCase())} <code>${esc(L.rangeToString(cov))} ${esc(t.units[to] || "")}</code>`);
       }
@@ -124,7 +147,14 @@
     const vis = visibleTitles();
     $("empty").hidden = vis.length !== 0;
     $("list").innerHTML = vis.map((t) => {
-      const comp = L.titleCompletion(t);
+      // One titleProgress per card: it already computes every per-track
+      // % and every equivalence pair. Previously trackView recomputed it
+      // 3x, titleCompletion once more, and equivView re-ran all 6
+      // equivalentCoverage calls — 500 heavy titles: boot 245ms -> 64ms,
+      // re-render 176ms -> 49ms (audit probe 2026-11-15).
+      const prog = L.titleProgress(t);
+      const pcts = L.TRACKS.map((tr) => prog.per[tr].pct).filter((p) => p !== null);
+      const comp = pcts.length === 0 ? null : Math.round(pcts.reduce((s, p) => s + p, 0) / pcts.length);
       const stars = t.rating > 0 ? `<span class="stars" title="Rated ${Math.round(t.rating)}/5">${"★".repeat(Math.round(t.rating))}${"☆".repeat(5 - Math.round(t.rating))}</span>` : "";
       return `<article class="card" data-id="${esc(t.id)}">
         <div class="card-head">
@@ -135,9 +165,9 @@
           </span>
         </div>
         <div class="tracks-view">
-          ${L.TRACKS.map((tr) => trackView(t, tr)).join("")}
+          ${L.TRACKS.map((tr) => trackView(t, tr, prog)).join("")}
         </div>
-        ${equivView(t)}
+        ${equivView(t, prog)}
         ${mapTable(t)}
         <div class="card-actions" style="margin-top:12px">
           <button class="btn small" data-act="edit" type="button">Edit</button>

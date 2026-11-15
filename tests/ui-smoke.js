@@ -32,7 +32,7 @@ class El {
   remove() {}
 }
 
-function boot(storeData) {
+function boot(storeData, opts = {}) {
   const elements = {};
   const store = {};
   if (storeData !== undefined) store["lloreve.v1"] = storeData;
@@ -45,18 +45,28 @@ function boot(storeData) {
       createElement: (tag) => new El(tag),
       addEventListener: () => {},
     },
-    localStorage: {
-      getItem: (k) => (k in store ? store[k] : null),
-      setItem: (k, v) => { store[k] = String(v); },
-    },
+    localStorage: opts.quotaThrow
+      ? {
+          getItem: (k) => (k in store ? store[k] : null),
+          setItem: () => { const e = new Error("QuotaExceededError"); e.name = "QuotaExceededError"; throw e; },
+        }
+      : {
+          getItem: (k) => (k in store ? store[k] : null),
+          setItem: (k, v) => { store[k] = String(v); },
+        },
     structuredClone,
     confirm: () => true,
     alert: (msg) => { alerts.push(String(msg)); },
   };
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync("lloreve.js", "utf8"), sandbox, { filename: "lloreve.js" });
+  let progressCalls = 0;
+  if (opts.countProgress) {
+    const orig = sandbox.window.lloreve.titleProgress;
+    sandbox.window.lloreve.titleProgress = (...a) => { progressCalls++; return orig(...a); };
+  }
   vm.runInContext(fs.readFileSync("app.js", "utf8"), sandbox, { filename: "app.js" });
-  return { elements, store, alerts, sandbox };
+  return { elements, store, alerts, sandbox, get progressCalls() { return progressCalls; } };
 }
 
 let n = 0;
@@ -141,6 +151,68 @@ const L = require("../lloreve.js");
   const t = L.blankTitle(); t.name = "Half Star"; t.status = "reading"; t.rating = 3.5;
   const r = boot(JSON.stringify([t]));
   ok(r.elements.list.innerHTML.includes("★★★★☆"), "rating 3.5 renders ★★★★☆ (5 glyphs)");
+}
+
+/* ---- audit 2026-11-15: storage dedupe, quota failure, bidi strip, render cache ---- */
+{
+  // duplicate ids smuggled via hand-edited localStorage: only the first
+  // survives load, so edit/delete by id can no longer hit two titles
+  const a = L.blankTitle(); a.name = "Dup Stored A"; a.status = "reading";
+  const b = L.blankTitle(); b.name = "Dup Stored B"; b.status = "reading"; b.id = a.id;
+  const r = boot(JSON.stringify([a, b]));
+  ok(r.elements.list.innerHTML.includes("Dup Stored A"), "duplicate stored id: first title renders");
+  ok(!r.elements.list.innerHTML.includes("Dup Stored B"), "duplicate stored id: second title is dropped on load");
+}
+{
+  // localStorage quota failure: the action must not throw uncaught, the
+  // user must be told, and the UI must still re-render to match memory
+  // (boot from a custom title so a stale list would be visible)
+  const custom = L.blankTitle(); custom.name = "Custom Before Reset"; custom.status = "reading";
+  const r = boot(JSON.stringify([custom]), { quotaThrow: true });
+  ok(r.elements.list.innerHTML.includes("Custom Before Reset"), "quota setup: custom title renders before reset");
+  let threw = null;
+  try {
+    r.elements["btn-reset"].listeners.click[0]();
+  } catch (e) { threw = e; }
+  ok(threw === null, "quota failure: reset does not throw uncaught");
+  ok(r.alerts.length === 1 && r.alerts[0].includes("Could not save"), "quota failure: user is alerted, got: " + r.alerts.join("; "));
+  ok(!r.elements.list.innerHTML.includes("Custom Before Reset"), "quota failure: stale custom title is gone after reset");
+  ok(r.elements.list.innerHTML.includes("Attack on Titan"), "quota failure: list re-renders to the new in-memory state");
+}
+{
+  // bidi-override / control chars in a hostile title name are stripped
+  // before render, so they cannot reorder adjacent UI text
+  const t = L.blankTitle();
+  t.name = "Normal\u202E hacked — Delete\u0007"; t.status = "reading";
+  const r = boot(JSON.stringify([t]));
+  const html = r.elements.list.innerHTML;
+  ok(!html.includes("\u202E") && !html.includes("\u0007"), "bidi/control chars are stripped from rendered titles");
+  ok(html.includes("Normal hacked"), "stripped title still renders its visible text");
+}
+{
+  // card completion badge matches titleCompletion (guards the inline
+  // derivation from the cached titleProgress in renderList)
+  const r = boot();
+  ok(r.elements.list.innerHTML.includes("· 100%"), "AoT/Solo Leveling badge shows 100%");
+  ok(r.elements.list.innerHTML.includes("· 42%"), "KonoSuba badge shows 42% (= titleCompletion)");
+}
+{
+  // render cache: one titleProgress per card, not 3x trackView +
+  // titleCompletion + 6x equivalentCoverage
+  const mk = (i) => {
+    const t = L.blankTitle();
+    t.name = `Title ${i}`; t.status = "reading"; t.rating = 4;
+    t.owned = { ln: [[1, 50]], manga: [[1, 200]], anime: [[1, 50]] };
+    t.total = { ln: 100, manga: 300, anime: 60 };
+    t.mappings = [
+      { ln: [1, 25], manga: [1, 100], anime: [1, 25] },
+      { ln: [26, 50], manga: [101, 200], anime: [26, 50] },
+    ];
+    return t;
+  };
+  const data = Array.from({ length: 20 }, (_, i) => mk(i));
+  const r = boot(JSON.stringify(data), { countProgress: true });
+  ok(r.progressCalls <= 22, `render of 20 cards calls titleProgress ${r.progressCalls}x (was 60x before caching)`);
 }
 
 /* ---- async: import handler ---- */

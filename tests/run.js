@@ -172,4 +172,26 @@ eq(L.rangeSubtract([1, 10], [20, 30]), [[1, 10]], "subtract disjoint -> unchange
   ok(L.topTitles([bare], 5).length === 1, "topTitles tolerates missing owned/total");
 }
 
+/* 9. audit 2026-11-15: id uniqueness + truncated parse errors */
+{
+  // Date.now + 1296 random values per ms collided ~80k times per 200k
+  // calls; a monotonic counter now guarantees uniqueness in a session.
+  const ids = new Set();
+  for (let i = 0; i < 100000; i++) ids.add(L.newId());
+  ok(ids.size === 100000, "newId: 100k rapid calls are all unique");
+  // error messages must not echo a giant pasted input verbatim
+  try {
+    L.parseRanges("x".repeat(5000));
+    ok(false, "parse 5k-char junk throws");
+  } catch (e) {
+    ok(e.message.length < 200, `parse error truncates echoed input (got ${e.message.length} chars)`);
+  }
+  try {
+    L.parseRanges("1,".repeat(2000) + "abc");
+    ok(false, "parse trailing junk throws");
+  } catch (e) {
+    ok(e.message.length < 200, `parse error truncates long whole-input echo (got ${e.message.length} chars)`);
+  }
+}
+
 console.log(`\n${n} assertions passed.`);
